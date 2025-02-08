@@ -47,7 +47,7 @@ def audio_processor(audios):
     audio_grid_thws = []
     for audio in audios:
         audio_values.append(audio)
-        audio_grid_thws.append(p.array([whisper.audio.N_FRAMES//2,1,1]))
+        audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1]))
     audio_values = np.array(audio_values)
     audio_grid_thws = np.array(audio_grid_thws)
     data = {"audio_values": audio_values, "audio_grid_thw": audio_grid_thws}
