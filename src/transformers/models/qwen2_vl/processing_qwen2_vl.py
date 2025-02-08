@@ -45,8 +45,8 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
 def audio_processor(audios):
     audio_values = []
     audio_grid_thws = []
-    for audio in audios:
-        audio_values.append(audio)
+    for audio,sr in audios:
+        audio_values.extend(audio)
         audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1]))
     audio_values = np.array(audio_values)
     audio_grid_thws = np.array(audio_grid_thws)
