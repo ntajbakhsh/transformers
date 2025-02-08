@@ -24,7 +24,7 @@ Processor class for Qwen2-VL.
 from typing import List, Union
 
 from ...feature_extraction_utils import BatchFeature
-from ...image_utils import ImageInput, VideoInput
+from ...image_utils import ImageInput, VideoInput, AudioInput
 from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from ...tokenization_utils_base import PreTokenizedInput, TextInput
 from ...utils import logging
@@ -63,11 +63,13 @@ class Qwen2VLProcessor(ProcessorMixin):
     def __init__(self, image_processor=None, tokenizer=None, chat_template=None, **kwargs):
         self.image_token = "<|image_pad|>" if not hasattr(tokenizer, "image_token") else tokenizer.image_token
         self.video_token = "<|video_pad|>" if not hasattr(tokenizer, "video_token") else tokenizer.video_token
+        self.audio_token = "<|audio_pad|>" if not hasattr(tokenizer, "audio_token") else tokenizer.audio_token
         super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     def __call__(
         self,
         images: ImageInput = None,
+        audios: AudioInput = None,
         text: Union[TextInput, PreTokenizedInput, List[TextInput], List[PreTokenizedInput]] = None,
         videos: VideoInput = None,
         **kwargs: Unpack[Qwen2VLProcessorKwargs],
@@ -120,6 +122,14 @@ class Qwen2VLProcessor(ProcessorMixin):
             image_inputs = {}
             image_grid_thw = None
 
+        if audios is not None:
+            audio_inputs = audios
+            import whisper
+            audio_grid_thw = [whisper.audio.N_FRAMES//2,1,1]
+        else:
+            audio_inputs = {}
+            audio_grid_thw = None
+
         if videos is not None:
             videos_inputs = self.image_processor(images=None, videos=videos, **output_kwargs["videos_kwargs"])
             video_grid_thw = videos_inputs["video_grid_thw"]
@@ -152,9 +162,19 @@ class Qwen2VLProcessor(ProcessorMixin):
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
 
+        if audio_grid_thw is not None:
+            merge_length = 1 # no merging
+            index = 0
+            for i in range(len(text)):
+                while self.audio_token in text[i]:
+                    text[i] = text[i].replace(
+                        self.audio_token, "<|placeholder|>" * (audio_grid_thw[index].prod() // merge_length), 1
+                    )
+                    index += 1
+                text[i] = text[i].replace("<|placeholder|>", self.audio_token)
         text_inputs = self.tokenizer(text, **output_kwargs["text_kwargs"])
 
-        return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs})
+        return BatchFeature(data={**text_inputs, **image_inputs, **videos_inputs, **audio_inputs})
 
     def batch_decode(self, *args, **kwargs):
         """
