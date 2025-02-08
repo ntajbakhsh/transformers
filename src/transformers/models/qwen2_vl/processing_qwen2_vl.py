@@ -22,7 +22,8 @@ Processor class for Qwen2-VL.
 """
 
 from typing import List, Union
-
+import whisper
+import numpy as np
 from ...feature_extraction_utils import BatchFeature
 from ...image_utils import ImageInput, VideoInput, AudioInput
 from ...processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
@@ -39,6 +40,19 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
             "padding": False,
         },
     }
+
+
+def audio_processor(audios):
+    audio_values = []
+    audio_grid_thws = []
+    for audio in audios:
+        audio_values.append(audio)
+        audio_grid_thws.append(p.array([whisper.audio.N_FRAMES//2,1,1]))
+    audio_values = np.array(audio_values)
+    audio_grid_thws = np.array(audio_grid_thws)
+    data = {"audio_values": audio_values, "audio_grid_thw": audio_grid_thws}
+
+    return BatchFeature(data=data, tensor_type='pt')
 
 
 class Qwen2VLProcessor(ProcessorMixin):
@@ -123,10 +137,8 @@ class Qwen2VLProcessor(ProcessorMixin):
             image_grid_thw = None
 
         if audios is not None:
-            audio_inputs = audios
-            import whisper
-            import numpy as np
-            audio_grid_thw = [np.array([whisper.audio.N_FRAMES//2,1,1]) for _ in range(len(audios))]
+            audio_inputs = audio_processor(audios)
+            audio_grid_thw = audio_inputs["audio_grid_thw"]
         else:
             audio_inputs = {}
             audio_grid_thw = None
@@ -162,15 +174,12 @@ class Qwen2VLProcessor(ProcessorMixin):
                     )
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
-        print('hey!')
+
         if audio_grid_thw is not None:
             merge_length = 1 # no merging
             index = 0
-            print('here1!')
             for i in range(len(text)):
-                print('here3!')
                 while self.audio_token in text[i]:
-                    print('here2!', audio_grid_thw[index].prod())
                     text[i] = text[i].replace(
                         self.audio_token, "<|placeholder|>" * (audio_grid_thw[index].prod() // merge_length), 1
                     )
