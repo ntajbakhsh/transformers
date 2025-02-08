@@ -125,7 +125,8 @@ class Qwen2VLProcessor(ProcessorMixin):
         if audios is not None:
             audio_inputs = audios
             import whisper
-            audio_grid_thw = [[whisper.audio.N_FRAMES//2,1,1] for _ in range(len(audios))]
+            import numpy as np
+            audio_grid_thw = [np.array([whisper.audio.N_FRAMES//2,1,1]) for _ in range(len(audios))]
         else:
             audio_inputs = {}
             audio_grid_thw = None
