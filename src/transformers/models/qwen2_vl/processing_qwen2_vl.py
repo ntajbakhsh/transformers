@@ -125,7 +125,7 @@ class Qwen2VLProcessor(ProcessorMixin):
         if audios is not None:
             audio_inputs = audios
             import whisper
-            audio_grid_thw = [whisper.audio.N_FRAMES//2,1,1]
+            audio_grid_thw = [[whisper.audio.N_FRAMES//2,1,1] for _ in range(len(audios))]
         else:
             audio_inputs = {}
             audio_grid_thw = None
@@ -165,8 +165,11 @@ class Qwen2VLProcessor(ProcessorMixin):
         if audio_grid_thw is not None:
             merge_length = 1 # no merging
             index = 0
+            print('here1!')
             for i in range(len(text)):
+                print('here3!')
                 while self.audio_token in text[i]:
+                    print('here2!', audio_grid_thw[index].prod())
                     text[i] = text[i].replace(
                         self.audio_token, "<|placeholder|>" * (audio_grid_thw[index].prod() // merge_length), 1
                     )
