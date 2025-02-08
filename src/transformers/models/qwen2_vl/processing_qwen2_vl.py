@@ -161,7 +161,7 @@ class Qwen2VLProcessor(ProcessorMixin):
                     )
                     index += 1
                 text[i] = text[i].replace("<|placeholder|>", self.video_token)
-
+        print('hey!')
         if audio_grid_thw is not None:
             merge_length = 1 # no merging
             index = 0
