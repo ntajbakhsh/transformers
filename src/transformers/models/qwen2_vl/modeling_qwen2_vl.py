@@ -1825,15 +1825,17 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
         #TODO: check if resize should be called on self or self.model
         #TODO: check if lm_head is updated too
-        self.resize_token_embeddings(self.config.vocab_size + 3)
+        self.resize_token_embeddings(self.config.vocab_size + 3) # 3 special tokens for audio
 
     def get_rope_index(
         self,
         input_ids: Optional[torch.LongTensor] = None,
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
+        audio_grid_thw: Optional[torch.LongTensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        #TODO: test this method with 1 audio and 1 image on a VLA model instance
         """
         Calculate the 3D rope index based on image and video's temporal, height and width in LLM.
 
@@ -1953,23 +1955,32 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLForConditionalGeneration):
                         remain_audios -= 1
                         ed = ed_audio
                         spatial_merge_size = 1
-                        
-                    llm_grid_t, llm_grid_h, llm_grid_w = (
-                        t.item(),
-                        h.item() // spatial_merge_size,
-                        w.item() // spatial_merge_size,
-                    )
-                    text_len = ed - st
 
+                    # add position ids for text
+                    text_len = ed - st
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     llm_pos_ids_list.append(torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
-                    t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
-                    h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
-                    w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
-                    llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
-                    st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+                    # add position ids for vision
+                    if (ed_image < ed_video and ed_image < ed_audio) or (
+                        ed_video < ed_image and ed_video < ed_audio):
+                        llm_grid_t, llm_grid_h, llm_grid_w = (
+                            t.item(),
+                            h.item() // spatial_merge_size,
+                            w.item() // spatial_merge_size,
+                        )
+                        t_index = torch.arange(llm_grid_t).view(-1, 1).expand(-1, llm_grid_h * llm_grid_w).flatten()
+                        h_index = torch.arange(llm_grid_h).view(1, -1, 1).expand(llm_grid_t, -1, llm_grid_w).flatten()
+                        w_index = torch.arange(llm_grid_w).view(1, 1, -1).expand(llm_grid_t, llm_grid_h, -1).flatten()
+                        llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
+                        st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+                    else:
+                        # add position ids for audio
+                        audio_len = t.item() * h.item() * w.item()
+                        llm_pos_ids_list.append(torch.arange(audio_len).view(1, -1).expand(3, -1) + text_len + st_idx)
+                        st = ed + audio_len
 
+                #add position ids for any remaning text after all the vision and audio content
                 if st < len(input_tokens):
                     st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
                     text_len = len(input_tokens) - st
@@ -2001,5 +2012,89 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
             return position_ids, mrope_position_deltas
 
+def prepare_inputs_for_generation(
+        self,
+        input_ids,
+        past_key_values=None,
+        attention_mask=None,
+        inputs_embeds=None,
+        cache_position=None,
+        position_ids=None,
+        use_cache=True,
+        pixel_values=None,
+        pixel_values_videos=None,
+        audio_values=None,
+        image_grid_thw=None,
+        video_grid_thw=None,
+        audio_grid_thw=None,
+        **kwargs,
+    ):
+        # Overwritten -- in specific circumstances we don't want to forward image inputs to the model
+
+        # If we have cache: let's slice `input_ids` through `cache_position`, to keep only the unprocessed tokens
+        # Exception 1: when passing input_embeds, input_ids may be missing entries
+        # Exception 2: some generation methods do special slicing of input_ids, so we don't need to do it here
+        # Exception 3: with synced GPUs cache_position may go out of bounds, but we only want dummy token in that case.
+        #              (we can't check exception 3 while compiling)
+        # Exception 4: If input_embeds are passed then slice it through `cache_position`, to keep only the unprocessed tokens and
+        # generate the first token for each sequence. Later use the generated Input ids for continuation.
+        if past_key_values is not None:
+            if inputs_embeds is not None and input_ids.shape[1] == 0:  # Exception 4
+                inputs_embeds = inputs_embeds[:, -cache_position.shape[0] :]
+            elif (
+                inputs_embeds is not None  # Exception 1
+                or (is_torchdynamo_compiling() or cache_position[-1] >= input_ids.shape[1])  # Exception 3
+            ):
+                input_ids = input_ids[:, -cache_position.shape[0] :]
+            elif input_ids.shape[1] != cache_position.shape[0]:  # Default case (the "else", a no op, is Exception 2)
+                input_ids = input_ids[:, cache_position]
+
+        if cache_position[0] != 0:
+            pixel_values = None
+            pixel_values_videos = None
+            audio_values = None
+
+        # if `inputs_embeds` are passed, we only want to use them in the 1st generation step
+        if inputs_embeds is not None and len(cache_position) == inputs_embeds.shape[1]:
+            model_inputs = {"inputs_embeds": inputs_embeds, "input_ids": None}
+        else:
+            model_inputs = {"input_ids": input_ids, "inputs_embeds": None}
+
+        if isinstance(past_key_values, StaticCache) and attention_mask.ndim == 2:
+            if model_inputs["inputs_embeds"] is not None:
+                batch_size, sequence_length, _ = inputs_embeds.shape
+                device = inputs_embeds.device
+            else:
+                batch_size, sequence_length = input_ids.shape
+                device = input_ids.device
+
+            attention_mask = self.model._prepare_4d_causal_attention_mask_with_cache_position(
+                attention_mask,
+                sequence_length=sequence_length,
+                target_length=past_key_values.get_max_cache_shape(),
+                dtype=self.lm_head.weight.dtype,
+                device=device,
+                cache_position=cache_position,
+                batch_size=batch_size,
+                config=self.config,
+                past_key_values=past_key_values,
+            )
+
+        model_inputs.update(
+            {
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "use_cache": use_cache,
+                "attention_mask": attention_mask,
+                "pixel_values": pixel_values,
+                "pixel_values_videos": pixel_values_videos,
+                "audio_values": audio_values,
+                "image_grid_thw": image_grid_thw,
+                "video_grid_thw": video_grid_thw,
+                "audio_grid_thw": audio_grid_thw,
+                "cache_position": cache_position,
+            }
+        )
+        return model_inputs
 
 __all__ = ["Qwen2VLForConditionalGeneration", "Qwen2VLAForConditionalGeneration", "Qwen2VLModel", "Qwen2VLPreTrainedModel"]
