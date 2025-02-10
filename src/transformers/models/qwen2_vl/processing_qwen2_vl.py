@@ -41,13 +41,20 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
         },
     }
 
-
+from ..utils import make_flat_list_of_images
 def audio_processor(audios):
+    # flatten all audios in the batch into 1 list
+    if isinstance(audios, list) and isinstance(audios[0], list):
+        audios =  [audio_sample for audio_samples in audios for audio_sample in audio_samples]
+    if isinstance(audios, tuple):
+        audios = [audios]
+
     audio_values = []
     audio_grid_thws = []
     for audio,sr in audios:
         audio_values.extend(audio)
-        audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1]))
+        #TODO: verify N_FRAMES
+        audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1])) #1500 for whisper-turbo
     audio_values = np.array(audio_values)
     audio_grid_thws = np.array(audio_grid_thws)
     data = {"audio_values": audio_values, "audio_grid_thw": audio_grid_thws}

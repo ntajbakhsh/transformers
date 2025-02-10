@@ -1507,16 +1507,6 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
                     llm_pos_ids_list.append(torch.stack([t_index, h_index, w_index]) + text_len + st_idx)
                     st = ed + llm_grid_t * llm_grid_h * llm_grid_w
                 
-                # TODO: PDB to understand how the code above works
-                if st < len(input_tokens):
-                    audio_nums = torch.sum(input_ids == audio_start_token_id)
-                    audio_len = torch.sum(input_ids == audio_token_id)
-                    st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
-                    
-                    total_audio_len = audio_nums*2 + audio_len # begin+end
-                    llm_pos_ids_list.append(torch.arange(total_audio_len).view(1, -1).expand(3, -1) + st_idx)
-
-                    # st += 
 
                     
                 if st < len(input_tokens):
@@ -1807,16 +1797,27 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
 import whisper
 class AudioEncoder(nn.Module):
-    def __init__(self, model_size="turbo"):
+    def __init__(self, model_size="whisper-turbo"):
+        # turbo has a stride of 2 and hidden dim of 1280
         super().__init__()
-        self.audio_encoder = whisper.load_model(model_size)
-
+        assert model_size == "whisper-turbo"
+        self.hid_dim = 1280
+        self.stride = 2
+        self.model = whisper.load_model(model_size)
+    def get_dtype(self):
+        return list(self.model.parameters())[0].dtype
+    def get_device(self):
+        return list(self.model.parameters())[0].device
     def forward(self, audio):
+        dtype = audio.dtype
         audio = whisper.pad_or_trim(audio)
-        audio = whisper.log_mel_spectrogram(audio, n_mels=self.audio_encoder.dims.n_mels)
-        return self.audio_encoder.encoder(audio)
-        #TODO: add adapter layers, post_init() needed?
+        mel = whisper.log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels)
+        mel = mel.to(dtype=self.get_dtype(), device=self.get_device()) 
+        embedding = self.model.encoder(mel)
+        return embedding.to(dtype)
+        
 
+    
 class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
@@ -1825,14 +1826,22 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         self.visual = Qwen2VisionTransformerPretrainedModel._from_config(config.vision_config)
         self.model = Qwen2VLModel(config)
         self.audio_ecnoder = AudioEncoder()
+        self.audio_projector= nn.Linear(self.audio_ecnoder.hid_dim, config.hidden_size, bias=False) 
 
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.rope_deltas = None  # cache rope_deltas here
 
-        #TODO: check if resize should be called on self or self.model
-        #TODO: check if lm_head is updated too
+        #TODO: since the model is first randomly initialized in Qwen2VLPreTrainedModel and then loaded 
+        # with pretrained weights, maybe we should resize the model outside here so the weight loading 
+        # doesn't fail due to a shape mismatch
         self.resize_token_embeddings(self.config.vocab_size + 3) # 3 special tokens for audio
+        #TODO: add these tokens to the config before initialization of the model class
+        #151657: AddedToken("<|audio_start|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+	    #151658: AddedToken("<|audio_pad|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+	    #151659: AddedToken("<|audio_end|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
+        self.config.audio_token_id = 151658
+        self.config.audio_start_token_id = 151657
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -1856,6 +1865,217 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
     def get_decoder(self):
         return self.model
     
+    #TODO: implement he forward method
+    @add_start_docstrings_to_model_forward(QWEN2_VL_INPUTS_DOCSTRING)
+    @replace_return_docstrings(output_type=Qwen2VLCausalLMOutputWithPast, config_class=_CONFIG_FOR_DOC)
+    def forward(
+        self,
+        input_ids: torch.LongTensor = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.LongTensor] = None,
+        past_key_values: Optional[List[torch.FloatTensor]] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.LongTensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        pixel_values_videos: Optional[torch.FloatTensor] = None,
+        audio_values: Optional[torch.FloatTensor] = None,
+        image_grid_thw: Optional[torch.LongTensor] = None,
+        video_grid_thw: Optional[torch.LongTensor] = None,
+        audio_grid_thw: Optional[torch.LongTensor] = None,
+        rope_deltas: Optional[torch.LongTensor] = None,
+        cache_position: Optional[torch.LongTensor] = None,
+    ) -> Union[Tuple, Qwen2VLCausalLMOutputWithPast]:
+        r"""
+        Args:
+            labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
+                Labels for computing the masked language modeling loss. Indices should either be in `[0, ...,
+                config.vocab_size]` or -100 (see `input_ids` docstring). Tokens with indices set to `-100` are ignored
+                (masked), the loss is only computed for the tokens with labels in `[0, ..., config.vocab_size]`.
+
+        Returns:
+
+        Example:
+
+        ```python
+        >>> from PIL import Image
+        >>> import requests
+        >>> from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+
+        >>> model = Qwen2VLForConditionalGeneration.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+        >>> processor = AutoProcessor.from_pretrained("Qwen/Qwen2-VL-7B-Instruct")
+
+        >>> messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image"},
+                    {"type": "text", "text": "What is shown in this image?"},
+                ],
+            },
+        ]
+        >>> url = "https://www.ilankelman.org/stopsigns/australia.jpg"
+        >>> image = Image.open(requests.get(url, stream=True).raw)
+
+        >>> text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        >>> inputs = processor(text=[text], images=[image], vision_infos=[vision_infos])
+
+        >>> # Generate
+        >>> generate_ids = model.generate(inputs.input_ids, max_length=30)
+        >>> tokenizer.batch_decode(generate_ids, skip_special_tokens=True, clean_up_tokenization_spaces=False)[0]
+        "The image shows a street scene with a red stop sign in the foreground. In the background, there is a large red gate with Chinese characters ..."
+        ```"""
+
+        output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
+        output_hidden_states = (
+            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
+        )
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        if inputs_embeds is None:
+            inputs_embeds = self.model.embed_tokens(input_ids)
+            if pixel_values is not None:
+                # input_ids: BxS
+                # input_embeds: BxSxH
+                # Note the below tensors have no B dim. That is, pixel vals for all images and all samples in the B are fed at once to the image encoder
+                # pixel_values: S'xh where h is 14*14*3*2 with 2 bings temporal dim (images are duplicated across t)
+                # image_embeds: S'/4xH where /4 is for token merging and H is hidden dim of image encoder
+                pixel_values = pixel_values.type(self.visual.get_dtype())
+                image_embeds = self.visual(pixel_values, grid_thw=image_grid_thw)
+                n_image_tokens = (input_ids == self.config.image_token_id).sum().item()
+                n_image_features = image_embeds.shape[0]
+                if n_image_tokens != n_image_features:
+                    raise ValueError(
+                        f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
+                    )
+                image_mask = (
+                    (input_ids == self.config.image_token_id)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                image_embeds = image_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(image_mask, image_embeds)
+
+            if pixel_values_videos is not None:
+                pixel_values_videos = pixel_values_videos.type(self.visual.get_dtype())
+                video_embeds = self.visual(pixel_values_videos, grid_thw=video_grid_thw)
+                n_video_tokens = (input_ids == self.config.video_token_id).sum().item()
+                n_video_features = video_embeds.shape[0]
+                if n_video_tokens != n_video_features:
+                    raise ValueError(
+                        f"Video features and video tokens do not match: tokens: {n_video_tokens}, features {n_video_features}"
+                    )
+                video_mask = (
+                    (input_ids == self.config.video_token_id)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                video_embeds = video_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(video_mask, video_embeds)
+            #TODO: send audio signals to audio encoder and projection, concat audio signals for a sample in the batch, insert audio embeddings into their right place in the squence
+            if audio_values is not None:
+                # ndim is always 3, because we have appended?
+                # input_ids: BxS
+                # audio_values: Sxh where S is concat of all audios in the batch in mel format 
+                # audio_embdeds: BxsxH where s < S
+
+                # split Sxh into BxS'xh, and feed each sample in the batch to the audio encoder
+                _, hid = audio_values.shape
+                audio_values = audio_values.reshape(len(audio_grid_thw),-1, hid)
+                audio_embeds = self.audio_projector(self.audio_ecnoder(audio_values))
+                _, hid = audio_embeds.shape
+                audio_embeds = audio_embeds.reshape(-1, hid)
+
+                n_audio_tokens = (input_ids == self.config.audio_token_id).sum().item()
+                n_audio_features = audio_embeds.shape()[:-1].prod()
+                if n_audio_tokens != n_audio_features:
+                    raise ValueError(
+                        f"Audio features and Audio tokens do not match: tokens: {n_audio_tokens}, features {n_audio_features}"
+                    )
+                audio_mask = (
+                    (input_ids == self.config.audio_token_id)
+                    .unsqueeze(-1)
+                    .expand_as(inputs_embeds)
+                    .to(inputs_embeds.device)
+                )
+                audio_embeds = audio_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(audio_mask, audio_embeds)
+
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(inputs_embeds.device)
+        # TODO: looks like we should leave position_ids as None so this func gets called
+        # if we get 4D attention mask we cannot calculate rope deltas anymore. TODO @raushan fixme
+        if position_ids is None and (attention_mask is None or attention_mask.ndim == 2):
+            # calculate RoPE index once per generation in the pre-fill stage only
+            if (
+                (cache_position is not None and cache_position[0] == 0)
+                or self.rope_deltas is None
+                or (past_key_values is None or past_key_values.get_seq_length() == 0)
+            ):
+                position_ids, rope_deltas = self.get_rope_index(
+                    input_ids, image_grid_thw, video_grid_thw, audio_grid_thw, attention_mask
+                )
+                self.rope_deltas = rope_deltas
+            # then use the prev pre-calculated rope-deltas to get the correct position ids
+            else:
+                batch_size, seq_length, _ = inputs_embeds.shape
+                delta = cache_position[0] + self.rope_deltas if cache_position is not None else 0
+                position_ids = torch.arange(seq_length, device=inputs_embeds.device)
+                position_ids = position_ids.view(1, -1).expand(batch_size, -1)
+                if cache_position is not None:  # otherwise `deltas` is an int `0`
+                    delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=0)
+                position_ids = position_ids.add(delta)
+                position_ids = position_ids.unsqueeze(0).expand(3, -1, -1)
+
+        outputs = self.model(
+            input_ids=None,
+            position_ids=position_ids,
+            attention_mask=attention_mask,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            cache_position=cache_position,
+        )
+
+        hidden_states = outputs[0]
+        logits = self.lm_head(hidden_states)
+
+        loss = None
+        if labels is not None:
+            # Upcast to float if we need to compute the loss to avoid potential precision issues
+            logits = logits.float()
+            # Shift so that tokens < n predict n
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            # Flatten the tokens
+            loss_fct = CrossEntropyLoss()
+            shift_logits = shift_logits.view(-1, self.config.vocab_size)
+            shift_labels = shift_labels.view(-1)
+            # Enable model parallelism
+            shift_labels = shift_labels.to(shift_logits.device)
+            loss = loss_fct(shift_logits, shift_labels)
+
+        if not return_dict:
+            output = (logits,) + outputs[1:]
+            return (loss,) + output if loss is not None else output
+
+        return Qwen2VLCausalLMOutputWithPast(
+            loss=loss,
+            logits=logits,
+            past_key_values=outputs.past_key_values,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+            rope_deltas=self.rope_deltas,
+        )
+
     def get_rope_index(
         self,
         input_ids: Optional[torch.LongTensor] = None,
@@ -1913,12 +2133,8 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         image_token_id = self.config.image_token_id
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
-
-        #151657: AddedToken("<|audio_start|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-	    #151658: AddedToken("<|audio_pad|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-	    #151659: AddedToken("<|audio_end|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-        audio_token_id = 151658
-        audio_start_token_id = 151657
+        audio_token_id = self.config.audio_token_id
+        audio_start_token_id = self.config.audio_token_id
 
         mrope_position_deltas = []
         if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
