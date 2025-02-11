@@ -41,7 +41,7 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
         },
     }
 
-from ..utils import make_flat_list_of_images
+
 def audio_processor(audios):
     # flatten all audios in the batch into 1 list
     if isinstance(audios, list) and isinstance(audios[0], list):
