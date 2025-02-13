@@ -1797,10 +1797,10 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
 
 import whisper
 class AudioEncoder(nn.Module):
-    def __init__(self, model_size="whisper-turbo"):
+    def __init__(self, model_size="turbo"):
         # turbo has a stride of 2 and hidden dim of 1280
         super().__init__()
-        assert model_size == "whisper-turbo"
+        assert model_size == "turbo"
         self.hid_dim = 1280
         self.stride = 2
         self.model = whisper.load_model(model_size)
@@ -1825,8 +1825,8 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         super().__init__(config)
         self.visual = Qwen2VisionTransformerPretrainedModel._from_config(config.vision_config)
         self.model = Qwen2VLModel(config)
-        self.audio_ecnoder = AudioEncoder()
-        self.audio_projector= nn.Linear(self.audio_ecnoder.hid_dim, config.hidden_size, bias=False) 
+        self.audio_encoder = AudioEncoder()
+        self.audio_projector= nn.Linear(self.audio_encoder.hid_dim, config.hidden_size, bias=False) 
 
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
@@ -1987,7 +1987,7 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
                 # split Sxh into BxS'xh, and feed each sample in the batch to the audio encoder
                 _, hid = audio_values.shape
                 audio_values = audio_values.reshape(len(audio_grid_thw),-1, hid)
-                audio_embeds = self.audio_projector(self.audio_ecnoder(audio_values))
+                audio_embeds = self.audio_projector(self.audio_encoder(audio_values))
                 _, hid = audio_embeds.shape
                 audio_embeds = audio_embeds.reshape(-1, hid)
 
