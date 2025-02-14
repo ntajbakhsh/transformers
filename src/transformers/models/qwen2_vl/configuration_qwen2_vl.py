@@ -22,6 +22,39 @@ from ...utils import logging
 logger = logging.get_logger(__name__)
 
 
+class Qwen2VLA_AudioConfig(PretrainedConfig):
+    model_type = "qwen2_vl" # TODO: fix it
+    base_config_key = "audio_config"
+
+    def __init__(
+        self,
+        n_mels=128,
+        n_audio_ctx=1500,
+        n_audio_state=1280,
+        n_audio_head=20,
+        n_audio_layer=32,
+        n_vocab=51866,
+        n_text_ctx=448,
+        n_text_state=1280,
+        n_text_head=20,
+        n_text_layer=4,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+
+        self.n_mels = n_mels
+        self.n_audio_ctx = n_audio_ctx
+        self.n_audio_state = n_audio_state
+        self.n_audio_head = n_audio_head
+        self.n_audio_layer = n_audio_layer
+        self.n_vocab = n_vocab
+        self.n_text_ctx = n_text_ctx
+        self.n_text_state = n_text_state
+        self.n_text_head = n_text_head
+        self.n_text_layer = n_text_layer
+
+
+
 class Qwen2VLVisionConfig(PretrainedConfig):
     model_type = "qwen2_vl"
     base_config_key = "vision_config"
@@ -239,4 +272,13 @@ class Qwen2VLConfig(PretrainedConfig):
         super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
 
 
-__all__ = ["Qwen2VLConfig"]
+class Qwen2VLAConfig(Qwen2VLConfig):
+    sub_configs = Qwen2VLConfig.update({"audio_config": Qwen2VLA_AudioConfig})
+    def __init__(self, audio_config=None, **kwargs):
+        super().__init__(**kwargs)
+        if isinstance(audio_config, dict):
+            self.audio_config = self.sub_configs["audio_config"](**audio_config)
+        elif audio_config is None:
+            self.audio_config = self.sub_configs["audio_config"]()
+
+__all__ = ["Qwen2VLConfig", "Qwen2VLAConfig"]

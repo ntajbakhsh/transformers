@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint
 from torch.nn import CrossEntropyLoss, LayerNorm
-
+from whisper.model import ResidualAttentionBlock
 from ...activations import ACT2FN
 from ...cache_utils import Cache, DynamicCache, SlidingWindowCache, StaticCache
 from ...generation import GenerationMixin
@@ -45,7 +45,7 @@ from ...utils import (
     logging,
     replace_return_docstrings,
 )
-from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLVisionConfig
+from .configuration_qwen2_vl import Qwen2VLConfig, Qwen2VLAConfig, Qwen2VLVisionConfig
 
 
 if is_flash_attn_2_available():
@@ -896,6 +896,20 @@ class Qwen2VLPreTrainedModel(PreTrainedModel):
             if module.padding_idx is not None:
                 module.weight.data[module.padding_idx].zero_()
 
+class Qwen2VLAPreTrainedModel(Qwen2VLPreTrainedModel):
+    config_class = Qwen2VLAConfig
+    _no_split_modules = ["Qwen2VLDecoderLayer", "Qwen2VLVisionBlock", "ResidualAttentionBlock"]
+
+    def _init_weights(self, module):
+        std = self.config.initializer_range
+        if isinstance(module, (nn.Linear, nn.Conv3d, nn.Conv1d)):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.bias is not None:
+                module.bias.data.zero_()
+        elif isinstance(module, nn.Embedding):
+            module.weight.data.normal_(mean=0.0, std=std)
+            if module.padding_idx is not None:
+                module.weight.data[module.padding_idx].zero_()
 
 class Qwen2VisionTransformerPretrainedModel(Qwen2VLPreTrainedModel):
     config_class = Qwen2VLVisionConfig
@@ -1795,53 +1809,55 @@ class Qwen2VLForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
         )
         return model_inputs
 
-import whisper
+from whisper import Whisper
+from whisper import ModelDimensions
+from whisper import log_mel_spectrogram
+from whisper import pad_or_trim
 class AudioEncoder(nn.Module):
-    def __init__(self, model_size="turbo"):
+    def __init__(self, config):
         # turbo has a stride of 2 and hidden dim of 1280
         super().__init__()
-        assert model_size == "turbo"
-        self.hid_dim = 1280
-        self.stride = 2
-        self.model = whisper.load_model(model_size)
+        self.config = ModelDimensions(
+                    n_mels=config.n_mels,
+                    n_audio_ctx=config.n_audio_ctx,
+                    n_audio_state=config.n_audio_state,
+                    n_audio_head=config.n_audio_head,
+                    n_audio_layer=config.n_audio_layer,
+                    n_vocab=config.n_vocab,
+                    n_text_ctx=config.n_text_ctx,
+                    n_text_state=config.n_text_state,
+                    n_text_head=config.n_text_head,
+                    n_text_layer=config.n_text_layer
+                )
+        self.model = Whisper(self.config)
+        
     def get_dtype(self):
         return list(self.model.parameters())[0].dtype
     def get_device(self):
         return list(self.model.parameters())[0].device
     def forward(self, audio):
         dtype = audio.dtype
-        audio = whisper.pad_or_trim(audio)
-        mel = whisper.log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels)
+        audio = pad_or_trim(audio)
+        mel = log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels)
         mel = mel.to(dtype=self.get_dtype(), device=self.get_device()) 
         embedding = self.model.encoder(mel)
         return embedding.to(dtype)
         
 
     
-class Qwen2VLAForConditionalGeneration(Qwen2VLPreTrainedModel, GenerationMixin):
+class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin):
     _tied_weights_keys = ["lm_head.weight"]
 
     def __init__(self, config):
         super().__init__(config)
         self.visual = Qwen2VisionTransformerPretrainedModel._from_config(config.vision_config)
         self.model = Qwen2VLModel(config)
-        self.audio_encoder = AudioEncoder()
-        self.audio_projector= nn.Linear(self.audio_encoder.hid_dim, config.hidden_size, bias=False) 
+        self.audio_encoder = AudioEncoder(config.audio_config)
+        self.audio_projector= nn.Linear(self.audio_encoder.config.n_audio_state, config.hidden_size, bias=False) 
 
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         self.rope_deltas = None  # cache rope_deltas here
-
-        #TODO: since the model is first randomly initialized in Qwen2VLPreTrainedModel and then loaded 
-        # with pretrained weights, maybe we should resize the model outside here so the weight loading 
-        # doesn't fail due to a shape mismatch
-        self.resize_token_embeddings(self.config.vocab_size + 3) # 3 special tokens for audio
-        #TODO: add these tokens to the config before initialization of the model class
-        #151657: AddedToken("<|audio_start|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-	    #151658: AddedToken("<|audio_pad|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-	    #151659: AddedToken("<|audio_end|>", rstrip=False, lstrip=False, single_word=False, normalized=False, special=True),
-        self.config.audio_token_id = 151658
-        self.config.audio_start_token_id = 151657
 
         # Initialize weights and apply final processing
         self.post_init()
