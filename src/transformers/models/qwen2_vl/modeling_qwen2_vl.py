@@ -1830,6 +1830,7 @@ class AudioEncoder(nn.Module):
                     n_text_layer=config.n_text_layer
                 )
         self.model = Whisper(self.config)
+        del self.model.alignment_heads # needed because it's a non persistent buffer which breaks autodevice placement of the model
         
     def get_dtype(self):
         return list(self.model.parameters())[0].dtype
