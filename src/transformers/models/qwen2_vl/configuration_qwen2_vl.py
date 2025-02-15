@@ -56,7 +56,7 @@ class Qwen2VLA_AudioConfig(PretrainedConfig):
 
 
 class Qwen2VLVisionConfig(PretrainedConfig):
-    model_type = "qwen2_vl"
+    model_type = "qwen2_vl" 
     base_config_key = "vision_config"
 
     def __init__(
@@ -273,7 +273,8 @@ class Qwen2VLConfig(PretrainedConfig):
 
 
 class Qwen2VLAConfig(Qwen2VLConfig):
-    sub_configs = Qwen2VLConfig.update({"audio_config": Qwen2VLA_AudioConfig})
+    sub_configs = {"audio_config": Qwen2VLA_AudioConfig}
+    sub_configs.update(Qwen2VLConfig.sub_configs)
     def __init__(self, audio_config=None, **kwargs):
         super().__init__(**kwargs)
         if isinstance(audio_config, dict):
