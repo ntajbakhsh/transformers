@@ -43,21 +43,20 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
 
 
 def audio_processor(audios):
-    # flatten all audios in the batch into 1 list
-    if isinstance(audios, list) and isinstance(audios[0], list):
-        audios =  [audio_sample for audio_samples in audios for audio_sample in audio_samples]
-    if isinstance(audios, tuple):
-        audios = [audios]
-
+    # due to extract_vision_info, all audios in all batches are already in 1x(|A1|+|A2|+...) where |A1} is # of audios in sample 1 in the batch
     audio_values = []
     audio_grid_thws = []
-    for audio,sr in audios:
+    audio_lengths = []
+    for audio in audios:
+        audio = audio.flatten()
         audio_values.extend(audio)
         #TODO: verify N_FRAMES
-        audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1])) #1500 for whisper-turbo
+        audio_grid_thws.append(np.array([whisper.audio.N_FRAMES//2,1,1])) # 1500 for whisper-turbo
+        audio_lengths.append(audio.shape[0])
     audio_values = np.array(audio_values)
     audio_grid_thws = np.array(audio_grid_thws)
-    data = {"audio_values": audio_values, "audio_grid_thw": audio_grid_thws}
+    audio_lengths = np.array(audio_lengths)
+    data = {"audio_values": audio_values, "audio_grid_thw": audio_grid_thws, "audio_lengths": audio_lengths}
 
     return BatchFeature(data=data, tensor_type='pt')
 

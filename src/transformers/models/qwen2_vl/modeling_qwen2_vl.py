@@ -1813,6 +1813,18 @@ from whisper import Whisper
 from whisper import ModelDimensions
 from whisper import log_mel_spectrogram
 from whisper import pad_or_trim
+import whisper
+
+def replace_layer_norm(module):
+    for name, child in module.named_children():
+        if isinstance(child, whisper.model.LayerNorm):
+            old_params = child.state_dict()
+            new_layer_norm = nn.LayerNorm(child.normalized_shape, eps=child.eps, elementwise_affine=child.elementwise_affine)
+            new_layer_norm.load_state_dict(old_params)
+            setattr(module, name, new_layer_norm)
+        else:
+            replace_layer_norm(child)
+
 class AudioEncoder(nn.Module):
     def __init__(self, config):
         # turbo has a stride of 2 and hidden dim of 1280
@@ -1830,8 +1842,9 @@ class AudioEncoder(nn.Module):
                     n_text_layer=config.n_text_layer
                 )
         self.model = Whisper(self.config)
-        del self.model.alignment_heads # needed because it's a non persistent buffer which breaks autodevice placement of the model
-        
+        replace_layer_norm(self.model.encoder)
+        del self.model.alignment_heads
+
     def get_dtype(self):
         return list(self.model.parameters())[0].dtype
     def get_device(self):
@@ -1841,6 +1854,9 @@ class AudioEncoder(nn.Module):
         audio = pad_or_trim(audio)
         mel = log_mel_spectrogram(audio, n_mels=self.model.dims.n_mels)
         mel = mel.to(dtype=self.get_dtype(), device=self.get_device()) 
+        if mel.ndim == 2:
+            # add a BS f 1
+            mel = mel.unsqueeze(0)
         embedding = self.model.encoder(mel)
         return embedding.to(dtype)
         
@@ -1903,6 +1919,7 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin)
         image_grid_thw: Optional[torch.LongTensor] = None,
         video_grid_thw: Optional[torch.LongTensor] = None,
         audio_grid_thw: Optional[torch.LongTensor] = None,
+        audio_lengths: Optional[torch.LongTensor] = None,
         rope_deltas: Optional[torch.LongTensor] = None,
         cache_position: Optional[torch.LongTensor] = None,
     ) -> Union[Tuple, Qwen2VLCausalLMOutputWithPast]:
@@ -1998,18 +2015,21 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin)
             if audio_values is not None:
                 # ndim is always 3, because we have appended?
                 # input_ids: BxS
-                # audio_values: Sxh where S is concat of all audios in the batch in mel format 
+                # audio_values: Sxh where S is concat of all audios in the batch
                 # audio_embdeds: BxsxH where s < S
 
                 # split Sxh into BxS'xh, and feed each sample in the batch to the audio encoder
-                _, hid = audio_values.shape
-                audio_values = audio_values.reshape(len(audio_grid_thw),-1, hid)
-                audio_embeds = self.audio_projector(self.audio_encoder(audio_values))
-                _, hid = audio_embeds.shape
-                audio_embeds = audio_embeds.reshape(-1, hid)
-
+                st = 0
+                encodings =[]
+                audio_values = audio_values.type(self.audio_encoder.get_dtype())
+                for length in audio_lengths:
+                    encoding = self.audio_encoder(audio_values[st:st+length])
+                    encodings.append(encoding)
+                    st += length
+                audio_values = torch.cat(encodings, dim=1)
+                audio_embeds = self.audio_projector(audio_values)
                 n_audio_tokens = (input_ids == self.config.audio_token_id).sum().item()
-                n_audio_features = audio_embeds.shape()[:-1].prod()
+                n_audio_features = torch.tensor(audio_embeds.shape[:-1]).prod().item()
                 if n_audio_tokens != n_audio_features:
                     raise ValueError(
                         f"Audio features and Audio tokens do not match: tokens: {n_audio_tokens}, features {n_audio_features}"
@@ -2151,7 +2171,7 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin)
         video_token_id = self.config.video_token_id
         vision_start_token_id = self.config.vision_start_token_id
         audio_token_id = self.config.audio_token_id
-        audio_start_token_id = self.config.audio_token_id
+        audio_start_token_id = self.config.audio_start_token_id
 
         mrope_position_deltas = []
         if input_ids is not None and (image_grid_thw is not None or video_grid_thw is not None):
@@ -2286,6 +2306,7 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin)
             pixel_values=None,
             pixel_values_videos=None,
             audio_values=None,
+            audio_lengths=None,
             image_grid_thw=None,
             video_grid_thw=None,
             audio_grid_thw=None,
@@ -2354,6 +2375,7 @@ class Qwen2VLAForConditionalGeneration(Qwen2VLAPreTrainedModel, GenerationMixin)
                     "image_grid_thw": image_grid_thw,
                     "video_grid_thw": video_grid_thw,
                     "audio_grid_thw": audio_grid_thw,
+                    "audio_lengths": audio_lengths,
                     "cache_position": cache_position,
                 }
             )
