@@ -42,11 +42,24 @@ class Qwen2VLProcessorKwargs(ProcessingKwargs, total=False):
     }
 
 
+def flatten_list(nested_list):
+    """Recursively flattens a nested list."""
+    flat_list = []
+    for item in nested_list:
+        if isinstance(item, list):  # If the item is a list, recurse
+            flat_list.extend(flatten_list(item))
+        else:
+            flat_list.append(item)
+    return flat_list
+
 def audio_processor(audios):
     # due to extract_vision_info, all audios in all batches are already in 1x(|A1|+|A2|+...) where |A1} is # of audios in sample 1 in the batch
     audio_values = []
     audio_grid_thws = []
     audio_lengths = []
+    import numpy
+    if not isinstance(audios[0], numpy.ndarray):
+        audios = flatten_list(audios)
     for audio in audios:
         audio = audio.flatten()
         audio_values.extend(audio)
